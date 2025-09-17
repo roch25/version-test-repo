@@ -1,44 +1,73 @@
-name: Versioning Checks
-
+name: Revalidate open PRs on main update
 on:
-  pull_request:
-    branches:
-      - main
-    types:
-      - opened
-      - synchronize
-      - edited
-  workflow_dispatch:
+  push:
+    branches: [ main ]
 
 permissions:
-  contents: write
+  contents: read
+  pull-requests: read
 
 jobs:
-  Version-Check:
+  revalidate:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Code
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: List open PRs targeting main
+        id: prs
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              base: 'main'
+            });
+            return prs.map(p => ({ number: p.number, headRef: p.head.ref, headSha: p.head.sha }));
+
+      - name: Checkout repository (needed to fetch PR refs)
         uses: actions/checkout@v3
+        with:
+          ref: main
+          fetch-depth: 0
 
-      - name: Validate Version Increment
+      - name: Validate each PR version
         run: |
-          git fetch origin main
-          CURRENT_VERSION=$(git show origin/main:package.json | node -e "console.log(JSON.parse(require('fs').readFileSync(0, 'utf8')).version);")
-          echo "Current version fetched from main branch: $CURRENT_VERSION"
+          set -e
+          PRS='${{ toJson(steps.prs.outputs.result) }}'
+          echo "Open PRs: $PRS"
 
-          NEW_VERSION=$(node -p "require('./package.json').version")
-          echo "New version from the current branch: $NEW_VERSION"
+          # iterate using jq; GitHub JS script returned JSON string in output
+          echo "$PRS" | jq -c '.[]' | while read pr; do
+            num=$(echo "$pr" | jq -r '.number')
+            sha=$(echo "$pr" | jq -r '.headSha')
+            ref=$(echo "$pr" | jq -r '.headRef')
 
-          # Function to compare versions
-          version_greater() {
-            dpkg --compare-versions "$1" gt "$2"
-          }
+            echo "==> Validating PR #$num (ref: $ref, sha: $sha)"
+            # fetch the PR head ref into a local branch
+            git fetch origin "$sha"
+            git checkout -b "pr-$num" "$sha"
 
-          # Check if the new version is less than or equal to the current version
-          if version_greater $NEW_VERSION $CURRENT_VERSION; then
-            echo "Version check passed: $NEW_VERSION is a valid increase."
-          else
-            echo "ERROR: New version ($NEW_VERSION) is less than or equal to current version ($CURRENT_VERSION). Please increment the version."
-            exit 1
-          fi
+            # run your existing validation logic (example)
+            CURRENT_VERSION=$(git show origin/main:package.json | node -e "console.log(JSON.parse(require('fs').readFileSync(0, 'utf8')).version);")
+            NEW_VERSION=$(node -p "require('./package.json').version")
+            echo "main: $CURRENT_VERSION, pr: $NEW_VERSION"
+
+            if dpkg --compare-versions "$NEW_VERSION" gt "$CURRENT_VERSION"; then
+              echo "PR #$num: OK"
+            else
+              echo "PR #$num: INVALID — $NEW_VERSION <= $CURRENT_VERSION"
+              # optionally fail the entire job, or just mark as failed in aggregate
+              exit 1
+            fi
+
+            # checkout back to main before next iteration
+            git checkout main
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
