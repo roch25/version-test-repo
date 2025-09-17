@@ -1,0 +1,43 @@
+name: Versioning Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  Version-Check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Validate Version Increment
+        run: |
+          git fetch origin main
+          CURRENT_VERSION=$(git show origin/main:package.json | node -e "console.log(JSON.parse(require('fs').readFileSync(0, 'utf8')).version);")
+          echo "Current version fetched from main branch: $CURRENT_VERSION"
+
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          echo "New version from the current branch: $NEW_VERSION"
+
+          # Function to compare versions
+          version_greater() {
+            dpkg --compare-versions "$1" gt "$2"
+          }
+
+          # Check if the new version is less than or equal to the current version
+          if version_greater $NEW_VERSION $CURRENT_VERSION; then
+            echo "Version check passed: $NEW_VERSION is a valid increase."
+          else
+            echo "ERROR: New version ($NEW_VERSION) is less than or equal to current version ($CURRENT_VERSION). Please increment the version."
+            exit 1
+          fi
